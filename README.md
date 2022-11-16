@@ -1,8 +1,8 @@
 ---
 title: Paella
-emoji: 🚀
-colorFrom: green
-colorTo: purple
+emoji: 🥘
+colorFrom: orange
+colorTo: black
 sdk: gradio
 sdk_version: 3.9.1
 app_file: app.py
@@ -10,4 +10,5 @@ pinned: false
 license: mit
 ---
 
-Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+Paella is a novel text-to-image model that uses a compressed quantized latent space, based on a f8 VQGAN, and a masked training objective to achieve fast generation in ~10 inference steps.
+
