@@ -2,7 +2,7 @@
 title: Paella
 emoji: 🥘
 colorFrom: orange
-colorTo: black
+colorTo: yellow
 sdk: gradio
 sdk_version: 3.9.1
 app_file: app.py
