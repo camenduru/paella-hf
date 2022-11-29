@@ -5,9 +5,12 @@ from PIL import Image
 from open_clip import tokenizer
 from rudalle import get_vae
 from einops import rearrange
+from huggingface_hub import hf_hub_download
 from modules import DenoiseUNet
 
-model_id = "./model_600000.pt"
+model_repo = "pcuenq/Paella"
+model_file = "model_600000.pt"
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 batch_size = 4
@@ -103,7 +106,8 @@ def decode(img_seq, shape=(32,32)):
         img = (img.clamp(-1., 1.) + 1) * 0.5
         return img
     
-state_dict = torch.load(model_id, map_location=device)
+model_path = hf_hub_download(repo_id=model_repo, filename=model_file)
+state_dict = torch.load(model_path, map_location=device)
 model = DenoiseUNet(num_labels=8192).to(device)
 model.load_state_dict(state_dict)
 model.eval().requires_grad_()

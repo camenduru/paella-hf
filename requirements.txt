@@ -4,3 +4,4 @@ rudalle
 open_clip_torch
 einops
 Pillow
+huggingface_hub
