@@ -102,7 +102,7 @@ vqmodel = get_vae().to(device)
 vqmodel.eval().requires_grad_(False)
 
 clip_model, _, _ = open_clip.create_model_and_transforms('ViT-H-14', pretrained='laion2b_s32b_b79k')
-clip_model = clip_model.to(device).eval().requires_grad_(False)
+clip_model = clip_model.to(device).half().eval().requires_grad_(False)
 
 def encode(x):
     return vqmodel.model.encode((2 * x - 1))[-1][-1]
