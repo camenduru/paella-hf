@@ -118,19 +118,16 @@ def decode(img_seq, shape=(32,32)):
         return img
     
 model_path = hf_hub_download(repo_id=model_repo, filename=model_file)
-state_dict = torch.load(model_path, map_location=device)
-model = DenoiseUNet(num_labels=8192, c_clip=1024, c_hidden=1280, down_levels=[1, 2, 8, 32], up_levels=[32, 8, 2, 1]).to(device)
-model.load_state_dict(state_dict)
+model = DenoiseUNet(num_labels=8192, c_clip=1024, c_hidden=1280, down_levels=[1, 2, 8, 32], up_levels=[32, 8, 2, 1])
+model = model.to(device).half()
+model.load_state_dict(torch.load(model_path, map_location=device))
 model.eval().requires_grad_()
 
 prior_path = hf_hub_download(repo_id=model_repo, filename=prior_file)
-prior_ckpt = torch.load(prior_path, map_location=device)
-prior = PriorModel().to(device)
-prior.load_state_dict(prior_ckpt)
+prior = PriorModel().to(device).half()
+prior.load_state_dict(torch.load(prior_path, map_location=device))
 prior.eval().requires_grad_(False)
 diffuzz = Diffuzz(device=device)
-
-del prior_ckpt, state_dict
 
 # -----
 
