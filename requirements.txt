@@ -1,7 +1,7 @@
--f https://download.pytorch.org/whl/cu116
 torch
 rudalle
 open_clip_torch
 einops
 Pillow
 huggingface_hub
+git+https://github.com/pabloppp/Arroz-Con-Cosas

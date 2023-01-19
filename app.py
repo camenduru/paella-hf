@@ -7,15 +7,24 @@ from rudalle import get_vae
 from einops import rearrange
 from huggingface_hub import hf_hub_download
 from modules import DenoiseUNet
+from arroz import Diffuzz, PriorModel
 
-model_repo = "pcuenq/Paella"
-model_file = "model_600000.pt"
+model_repo = "pcuenq/Arroz_con_cosas"
+model_file = "model_1b_img.pt"
+prior_file = "prior_v1_1500k_ema_fp16.pt"
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+device_text = "GPU 🔥" if torch.cuda.is_available() else "CPU 🥶"
 
 batch_size = 4
-steps = 11
-scale = 5
+latent_shape = (64, 64)
+
+generator_timesteps = 12
+generator_cfg = 5
+prior_timesteps = 60
+prior_cfg = 3.0
+prior_sampler = 'ddpm'
+clip_embedding_shape = (batch_size, 1024)
 
 
 def to_pil(images):
@@ -34,7 +43,7 @@ def gumbel_noise(t):
 def gumbel_sample(t, temperature=1., dim=-1):
     return ((t / max(temperature, 1e-10)) + gumbel_noise(t)).argmax(dim=dim)
 
-def sample(model, c, x=None, mask=None, T=12, size=(32, 32), starting_t=0, temp_range=[1.0, 1.0], typical_filtering=True, typical_mass=0.2, typical_min_tokens=1, classifier_free_scale=-1, renoise_steps=11, renoise_mode='start'):
+def sample(model, c, x=None, negative_embeddings=None, mask=None, T=12, size=(32, 32), starting_t=0, temp_range=[1.0, 1.0], typical_filtering=True, typical_mass=0.2, typical_min_tokens=1, classifier_free_scale=-1, renoise_steps=11, renoise_mode='start'):
     with torch.inference_mode():
         r_range = torch.linspace(0, 1, T+1)[:-1][:, None].expand(-1, c.size(0)).to(c.device)
         temperatures = torch.linspace(temp_range[0], temp_range[1], T)
@@ -51,7 +60,10 @@ def sample(model, c, x=None, mask=None, T=12, size=(32, 32), starting_t=0, temp_
             r, temp = r_range[i], temperatures[i]
             logits = model(x, c, r)
             if classifier_free_scale >= 0:
-                logits_uncond = model(x, torch.zeros_like(c), r)
+                if negative_embeddings is not None:
+                    logits_uncond = model(x, negative_embeddings, r)
+                else:
+                    logits_uncond = model(x, torch.zeros_like(c), r)
                 logits = torch.lerp(logits_uncond, logits, classifier_free_scale)
             x = logits
             x_flat = x.permute(0, 2, 3, 1).reshape(-1, x.size(1))
@@ -70,8 +82,7 @@ def sample(model, c, x=None, mask=None, T=12, size=(32, 32), starting_t=0, temp_
                     sorted_indices_to_remove[..., :typical_min_tokens] = 0
                 indices_to_remove = sorted_indices_to_remove.scatter(1, x_flat_indices, sorted_indices_to_remove)
                 x_flat = x_flat.masked_fill(indices_to_remove, -float("Inf"))
-            # x_flat = torch.multinomial(x_flat.div(temp).softmax(-1), num_samples=1)[:, 0]
-            x_flat = gumbel_sample(x_flat, temperature=temp)
+            x_flat = torch.multinomial(x_flat.div(temp).softmax(-1), num_samples=1)[:, 0]
             x = x_flat.view(x.size(0), *x.shape[2:])
             if mask is not None:
                 x = x * mask + (1-mask) * init_x
@@ -90,7 +101,7 @@ def sample(model, c, x=None, mask=None, T=12, size=(32, 32), starting_t=0, temp_
 vqmodel = get_vae().to(device)
 vqmodel.eval().requires_grad_(False)
 
-clip_model, _, _ = open_clip.create_model_and_transforms('ViT-g-14', pretrained='laion2b_s12b_b42k')
+clip_model, _, _ = open_clip.create_model_and_transforms('ViT-H-14', pretrained='laion2b_s32b_b79k')
 clip_model = clip_model.to(device).eval().requires_grad_(False)
 
 def encode(x):
@@ -108,22 +119,40 @@ def decode(img_seq, shape=(32,32)):
     
 model_path = hf_hub_download(repo_id=model_repo, filename=model_file)
 state_dict = torch.load(model_path, map_location=device)
-model = DenoiseUNet(num_labels=8192).to(device)
+model = DenoiseUNet(num_labels=8192, c_clip=1024, c_hidden=1280, down_levels=[1, 2, 8, 32], up_levels=[32, 8, 2, 1]).to(device)
 model.load_state_dict(state_dict)
 model.eval().requires_grad_()
 
+prior_path = hf_hub_download(repo_id=model_repo, filename=prior_file)
+prior_ckpt = torch.load(prior_path, map_location=device)
+prior = PriorModel().to(device)
+prior.load_state_dict(prior_ckpt)
+prior.eval().requires_grad_(False)
+diffuzz = Diffuzz(device=device)
+
+del prior_ckpt, state_dict
+
 # -----
 
-def infer(prompt):
-    latent_shape = (32, 32)
+def infer(prompt, negative_prompt=""):
     tokenized_text = tokenizer.tokenize([prompt] * batch_size).to(device)
+    negative_text = tokenizer.tokenize([negative_prompt] * batch_size).to(device)
     with torch.inference_mode():
         with torch.autocast(device_type="cuda"):
             clip_embeddings = clip_model.encode_text(tokenized_text)
+            neg_clip_embeddings = clip_model.encode_text(negative_text)
+
+            sampled_image_embeddings = diffuzz.sample(
+                prior, {'c': clip_embeddings}, clip_embedding_shape,
+                timesteps=prior_timesteps, cfg=prior_cfg, sampler=prior_sampler
+            )[-1]
+
             images = sample(
-                model, clip_embeddings, T=12, size=latent_shape, starting_t=0, temp_range=[1.0, 1.0],
-                typical_filtering=True, typical_mass=0.2, typical_min_tokens=1,
-                classifier_free_scale=scale, renoise_steps=steps, renoise_mode="start"
+                model, sampled_image_embeddings, negative_embeddings=neg_clip_embeddings,
+                T=generator_timesteps, size=latent_shape, starting_t=0, temp_range=[2.0, 0.1],
+                typical_filtering=False, typical_mass=0.2, typical_min_tokens=1,
+                classifier_free_scale=generator_cfg, renoise_steps=generator_timesteps-1,
+                renoise_mode="start"
             )
         images = decode(images[-1], latent_shape)    
     return to_pil(images)
@@ -231,7 +260,7 @@ block = gr.Blocks(css=css)
 
 with block:
     gr.HTML(
-        """
+        f"""
             <div style="text-align: center; max-width: 650px; margin: 0 auto;">
               <div
                 style="
@@ -278,6 +307,9 @@ with block:
                   Paella Demo
                 </h1>
               </div>
+              <p>
+                Running on <b>{device_text}</b>
+              </p>
               <p style="margin-bottom: 10px; font-size: 94%">
                 Paella is a novel text-to-image model that uses a compressed quantized latent space, based on a f8 VQGAN, and a masked training objective to achieve fast generation in ~10 inference steps.
               </p>
