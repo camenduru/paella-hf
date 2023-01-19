@@ -134,7 +134,7 @@ del prior_ckpt, state_dict
 
 # -----
 
-def infer(prompt, negative_prompt=""):
+def infer(prompt, negative_prompt):
     tokenized_text = tokenizer.tokenize([prompt] * batch_size).to(device)
     negative_text = tokenizer.tokenize([negative_prompt] * batch_size).to(device)
     with torch.inference_mode():
@@ -319,17 +319,29 @@ with block:
     with gr.Group():
         with gr.Box():
             with gr.Row(elem_id="prompt-container").style(mobile_collapse=False, equal_height=True):
-                text = gr.Textbox(
-                    label="Enter your prompt",
-                    show_label=False,
-                    max_lines=1,
-                    placeholder="Enter your prompt",
-                    elem_id="prompt-text-input",
-                ).style(
-                    border=(True, False, True, True),
-                    rounded=(True, False, False, True),
-                    container=False,
-                )
+                with gr.Column():
+                    text = gr.Textbox(
+                        label="Enter your prompt",
+                        show_label=False,
+                        max_lines=1,
+                        placeholder="Enter your prompt",
+                        elem_id="prompt-text-input",
+                    ).style(
+                        border=(True, False, True, True),
+                        rounded=(True, False, False, True),
+                        container=False,
+                    )
+                    negative = gr.Textbox(
+                        label="Enter your negative prompt",
+                        show_label=False,
+                        max_lines=1,
+                        placeholder="Enter a negative prompt",
+                        elem_id="negative-prompt-text-input",
+                    ).style(
+                        border=(True, False, True, True),
+                        rounded=(True, False, False, True),
+                        container=False,
+                    )
                 btn = gr.Button("Generate image").style(
                     margin=False,
                     rounded=(False, True, True, False),
@@ -340,8 +352,8 @@ with block:
             label="Generated images", show_label=False, elem_id="gallery"
         ).style(grid=[2], height="auto")
 
-        text.submit(infer, inputs=text, outputs=gallery)
-        btn.click(infer, inputs=text, outputs=gallery)
+        text.submit(infer, inputs=[text, negative], outputs=gallery)
+        btn.click(infer, inputs=[text, negative], outputs=gallery)
 
         gr.HTML(
             """
