@@ -2,6 +2,7 @@ torch
 open_clip_torch
 Pillow
 huggingface_hub
+transformers
 git+https://github.com/pabloppp/pytorch-tools
 git+https://github.com/pabloppp/Arroz-Con-Cosas
 git+https://github.com/fbcotter/pytorch_wavelets
