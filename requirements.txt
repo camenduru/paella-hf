@@ -1,7 +1,7 @@
 torch
 open_clip_torch
-einops
 Pillow
 huggingface_hub
-git+https://github.com/pcuenca/Arroz-Con-Cosas
-git+https://github.com/ai-forever/ru-dalle
+git+https://github.com/pabloppp/pytorch-tools
+git+https://github.com/pabloppp/Arroz-Con-Cosas
+git+https://github.com/fbcotter/pytorch_wavelets

@@ -1,23 +1,26 @@
 import gradio as gr
-import open_clip
 import torch
+import open_clip
+import torchvision
+from huggingface_hub import hf_hub_download
 from PIL import Image
 from open_clip import tokenizer
-from rudalle import get_vae
-from einops import rearrange
-from huggingface_hub import hf_hub_download
-from modules import DenoiseUNet
+from Paella.utils.modules import Paella
 from arroz import Diffuzz, PriorModel
+from transformers import AutoTokenizer, T5EncoderModel
+from Paella.src.vqgan import VQModel
+from Paella.utils.alter_attention import replace_attention_layers
 
-model_repo = "pcuenq/Arroz_con_cosas"
-model_file = "model_1b_img.pt"
-prior_file = "prior_v1_1500k_ema_fp16.pt"
+model_repo = "dome272/Paella"
+model_file = "paella_v3.pt"
+prior_file = "prior_v1.pt"
+vqgan_file = "vqgan_f4.pt"
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-device_text = "GPU 🔥" if torch.cuda.is_available() else "CPU 🥶"
 
 batch_size = 4
-latent_shape = (64, 64)
+latent_shape = (batch_size, 64, 64)  # latent shape of the generated image, we are using an f4 vqgan and thus sampling 64x64 will result in 256x256
+prior_timesteps, prior_cfg, prior_sampler, clip_embedding_shape = 60, 3.0, "ddpm", (batch_size, 1024)
 
 generator_timesteps = 12
 generator_cfg = 5
@@ -98,61 +101,135 @@ def sample(model, c, x=None, negative_embeddings=None, mask=None, T=12, size=(32
 
 # Model loading
 
-vqmodel = get_vae().to(device)
-vqmodel.eval().requires_grad_(False)
+# Load T5 on CPU
+t5_tokenizer = AutoTokenizer.from_pretrained("google/byt5-xl")
+t5_model = T5EncoderModel.from_pretrained("google/byt5-xl")
 
+# Load other models on GPU
 clip_model, _, _ = open_clip.create_model_and_transforms('ViT-H-14', pretrained='laion2b_s32b_b79k')
 clip_model = clip_model.to(device).half().eval().requires_grad_(False)
 
-def encode(x):
-    return vqmodel.model.encode((2 * x - 1))[-1][-1]
-    
-def decode(img_seq, shape=(32,32)):
-        img_seq = img_seq.view(img_seq.shape[0], -1)
-        b, n = img_seq.shape
-        one_hot_indices = torch.nn.functional.one_hot(img_seq, num_classes=vqmodel.num_tokens).float()
-        z = (one_hot_indices @ vqmodel.model.quantize.embed.weight)
-        z = rearrange(z, 'b (h w) c -> b c h w', h=shape[0], w=shape[1])
-        img = vqmodel.model.decode(z)
-        img = (img.clamp(-1., 1.) + 1) * 0.5
-        return img
-    
-model_path = hf_hub_download(repo_id=model_repo, filename=model_file)
-model = DenoiseUNet(num_labels=8192, c_clip=1024, c_hidden=1280, down_levels=[1, 2, 8, 32], up_levels=[32, 8, 2, 1])
-model = model.to(device).half()
-model.load_state_dict(torch.load(model_path, map_location=device))
-model.eval().requires_grad_()
+clip_preprocess = torchvision.transforms.Compose([
+    torchvision.transforms.Resize(224, interpolation=torchvision.transforms.InterpolationMode.BICUBIC),
+    torchvision.transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711)),
+])
+
+vqgan_path = hf_hub_download(repo_id=model_repo, filename=vqgan_file)
+vqmodel = VQModel().to(device)
+vqmodel.load_state_dict(torch.load(vqgan_path, map_location=device))
+vqmodel.eval().requires_grad_(False)
 
 prior_path = hf_hub_download(repo_id=model_repo, filename=prior_file)
 prior = PriorModel().to(device).half()
 prior.load_state_dict(torch.load(prior_path, map_location=device))
 prior.eval().requires_grad_(False)
+
+model_path = hf_hub_download(repo_id=model_repo, filename=model_file)
+model = Paella(byt5_embd=2560)
+model.load_state_dict(torch.load(model_path, map_location=device))
+model.eval().requires_grad_().half()
+replace_attention_layers(model)
+model.to(device)
+
 diffuzz = Diffuzz(device=device)
+
+@torch.inference_mode()
+def decode(img_seq):
+    return vqmodel.decode_indices(img_seq)
+
+@torch.inference_mode()
+def embed_t5(text, t5_tokenizer, t5_model, final_device="cuda"):
+    device = t5_model.device
+    t5_tokens = t5_tokenizer(text, padding="longest", return_tensors="pt", max_length=768, truncation=True).input_ids.to(device)
+    t5_embeddings = t5_model(input_ids=t5_tokens).last_hidden_state.to(final_device)
+    return t5_embeddings    
+
+@torch.inference_mode()
+def sample(model, model_inputs, latent_shape,
+           unconditional_inputs=None, init_x=None, steps=12, renoise_steps=None,
+           temperature = (0.7, 0.3), cfg=(8.0, 8.0),
+           mode = 'multinomial',        # 'quant', 'multinomial', 'argmax'
+           t_start=1.0, t_end=0.0,
+           sampling_conditional_steps=None, sampling_quant_steps=None, attn_weights=None
+    ):
+    device = unconditional_inputs["byt5"].device
+    if sampling_conditional_steps is None:
+        sampling_conditional_steps = steps
+    if sampling_quant_steps is None:
+        sampling_quant_steps = steps
+    if renoise_steps is None:
+        renoise_steps = steps-1
+    if unconditional_inputs is None:
+        unconditional_inputs = {k: torch.zeros_like(v) for k, v in model_inputs.items()}
+
+    init_noise = torch.randint(0, model.num_labels, size=latent_shape, device=device)
+    if init_x != None:
+        sampled = init_x
+    else:
+        sampled = init_noise.clone()
+    t_list = torch.linspace(t_start, t_end, steps+1)
+    temperatures = torch.linspace(temperature[0], temperature[1], steps)
+    cfgs = torch.linspace(cfg[0], cfg[1], steps)
+    for i, tv in enumerate(t_list[:steps]):
+        if i >= sampling_quant_steps:
+            mode = "quant"
+        t = torch.ones(latent_shape[0], device=device) * tv
+
+        logits = model(sampled, t, **model_inputs, attn_weights=attn_weights)
+        if cfg is not None and i < sampling_conditional_steps:
+            logits = logits * cfgs[i] + model(sampled, t, **unconditional_inputs) * (1-cfgs[i])
+        scores = logits.div(temperatures[i]).softmax(dim=1)
+
+        if mode == 'argmax':
+            sampled = logits.argmax(dim=1)
+        elif mode == 'multinomial':
+            sampled = scores.permute(0, 2, 3, 1).reshape(-1, logits.size(1))
+            sampled = torch.multinomial(sampled, 1)[:, 0].view(logits.size(0), *logits.shape[2:])
+        elif mode == 'quant':
+            sampled = scores.permute(0, 2, 3, 1) @ vqmodel.vquantizer.codebook.weight.data
+            sampled = vqmodel.vquantizer.forward(sampled, dim=-1)[-1]
+        else:
+            raise Exception(f"Mode '{mode}' not supported, use: 'quant', 'multinomial' or 'argmax'")
+
+        if i < renoise_steps:
+            t_next = torch.ones(latent_shape[0], device=device) * t_list[i+1]
+            sampled = model.add_noise(sampled, t_next, random_x=init_noise)[0]
+    return sampled
 
 # -----
 
 def infer(prompt, negative_prompt):
-    tokenized_text = tokenizer.tokenize([prompt] * batch_size).to(device)
-    negative_text = tokenizer.tokenize([negative_prompt] * batch_size).to(device)
+    text = tokenizer.tokenize([prompt] * latent_shape[0]).to(device)
     with torch.inference_mode():
-        with torch.autocast(device_type="cuda"):
-            clip_embeddings = clip_model.encode_text(tokenized_text)
-            neg_clip_embeddings = clip_model.encode_text(negative_text)
+        if negative_prompt:
+            clip_text_tokens_uncond = tokenizer.tokenize([negative_prompt] * len(text)).to(device)
+            t5_embeddings_uncond = embed_t5([negative_prompt] * len(text), t5_tokenizer, t5_model)
+        else:
+            clip_text_tokens_uncond = tokenizer.tokenize([""] * len(text)).to(device)
+            t5_embeddings_uncond = embed_t5([""] * len(text), t5_tokenizer, t5_model)
 
-            sampled_image_embeddings = diffuzz.sample(
-                prior, {'c': clip_embeddings}, clip_embedding_shape,
+        t5_embeddings = embed_t5([prompt] * latent_shape[0], t5_tokenizer, t5_model)
+        clip_text_embeddings = clip_model.encode_text(text)
+        clip_text_embeddings_uncond = clip_model.encode_text(clip_text_tokens_uncond)
+
+        with torch.autocast(device_type="cuda"):
+            clip_image_embeddings = diffuzz.sample(
+                prior, {'c': clip_text_embeddings}, clip_embedding_shape,
                 timesteps=prior_timesteps, cfg=prior_cfg, sampler=prior_sampler
             )[-1]
-
-            images = sample(
-                model, sampled_image_embeddings, negative_embeddings=neg_clip_embeddings,
-                T=generator_timesteps, size=latent_shape, starting_t=0, temp_range=[2.0, 0.1],
-                typical_filtering=False, typical_mass=0.2, typical_min_tokens=1,
-                classifier_free_scale=generator_cfg, renoise_steps=generator_timesteps-1,
-                renoise_mode="start"
-            )
-        images = decode(images[-1], latent_shape)    
-    return to_pil(images)
+                
+            attn_weights = torch.ones((t5_embeddings.shape[1]))
+            attn_weights[-4:] = 0.4  # reweigh attention weights for image embeddings --> less influence
+            attn_weights[:-4] = 1.2  # reweigh attention weights for the rest --> more influence
+            attn_weights = attn_weights.to(device)
+        
+            sampled_tokens = sample(model,
+                                    model_inputs={'byt5': t5_embeddings, 'clip': clip_text_embeddings, 'clip_image': clip_image_embeddings}, unconditional_inputs={'byt5': t5_embeddings_uncond, 'clip': clip_text_embeddings_uncond, 'clip_image': None},
+                                    temperature=(1.2, 0.2), cfg=(8,8), steps=32, renoise_steps=26, latent_shape=latent_shape, t_start=1.0, t_end=0.0,
+                                    mode="multinomial", sampling_conditional_steps=20, attn_weights=attn_weights)
+            
+    sampled = decode(sampled_tokens)
+    return to_pil(sampled.clamp(0, 1))
     
 css = """
         .gradio-container {
@@ -304,9 +381,6 @@ with block:
                   Paella Demo
                 </h1>
               </div>
-              <p>
-                Running on <b>{device_text}</b>
-              </p>
               <p style="margin-bottom: 10px; font-size: 94%">
                 Paella is a novel text-to-image model that uses a compressed quantized latent space, based on a f8 VQGAN, and a masked training objective to achieve fast generation in ~10 inference steps.
               </p>
@@ -321,7 +395,7 @@ with block:
                         label="Enter your prompt",
                         show_label=False,
                         max_lines=1,
-                        placeholder="Enter your prompt",
+                        placeholder="an image of a shiba inu, donning a spacesuit and helmet, traversing the uncharted terrain of a distant, extraterrestrial world, as a symbol of the intrepid spirit of exploration and the unrelenting curiosity that drives humanity to push beyond the bounds of the known",
                         elem_id="prompt-text-input",
                     ).style(
                         border=(True, False, True, True),
@@ -332,7 +406,7 @@ with block:
                         label="Enter your negative prompt",
                         show_label=False,
                         max_lines=1,
-                        placeholder="Enter a negative prompt",
+                        placeholder="low quality, low resolution, bad image, blurry, blur",
                         elem_id="negative-prompt-text-input",
                     ).style(
                         border=(True, False, True, True),
