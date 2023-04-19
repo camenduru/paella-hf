@@ -382,7 +382,9 @@ with block:
                 </h1>
               </div>
               <p style="margin-bottom: 10px; font-size: 94%">
-                Paella is a novel text-to-image model that uses a compressed quantized latent space, based on a f8 VQGAN, and a masked training objective to achieve fast generation in ~10 inference steps.
+                Paella is a novel text-to-image model that uses a compressed quantized latent space, based on a VQGAN, and a masked training objective to achieve fast generation in ~10 inference steps. 
+
+                This version builds on top of our initial paper, bringing Paella to a similar level as other state-of-the-art models, while preserving the compactness and clarity of the previous implementations. Please, refer to the resources below for details.
               </p>
             </div>
         """
@@ -432,7 +434,7 @@ with block:
                 </div>
                 <div class="acknowledgments">
                     <p><h4>Resources</h4>
-                    <a href="https://arxiv.org/abs/2211.07292" style="text-decoration: underline;">Paper</a>, <a href="https://github.com/dome272/Paella" style="text-decoration: underline;">official implementation</a>.
+                    <a href="https://arxiv.org/abs/2211.07292" style="text-decoration: underline;">Paper</a>, <a href="https://github.com/dome272/Paella" style="text-decoration: underline;">official implementation</a>, <a href="https://huggingface.co/dome272/Paella" style="text-decoration: underline;">Model Card</a>.
                     </p>
                     <p><h4>LICENSE</h4>
                     <a href="https://github.com/dome272/Paella/blob/main/LICENSE" style="text-decoration: underline;">MIT</a>.
