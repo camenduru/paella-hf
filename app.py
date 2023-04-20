@@ -198,7 +198,8 @@ def sample(model, model_inputs, latent_shape,
 
 # -----
 
-def infer(prompt, negative_prompt):
+def infer(prompt, negative_prompt, seed):
+    torch.manual_seed(seed)
     text = tokenizer.tokenize([prompt] * latent_shape[0]).to(device)
     with torch.inference_mode():
         if negative_prompt:
@@ -425,8 +426,18 @@ with block:
             label="Generated images", show_label=False, elem_id="gallery"
         ).style(grid=[2], height="auto")
 
-        text.submit(infer, inputs=[text, negative], outputs=gallery)
-        btn.click(infer, inputs=[text, negative], outputs=gallery)
+        with gr.Group():
+            with gr.Accordion("Advanced settings", open=False):
+                seed = gr.Slider(
+                    label="Seed",
+                    minimum=0,
+                    maximum=2147483647,
+                    step=1,
+                    randomize=True,
+                )
+
+        text.submit(infer, inputs=[text, negative, seed], outputs=gallery)
+        btn.click(infer, inputs=[text, negative, seed], outputs=gallery)
 
         gr.HTML(
             """
