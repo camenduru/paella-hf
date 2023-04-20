@@ -120,14 +120,14 @@ vqmodel.load_state_dict(torch.load(vqgan_path, map_location=device))
 vqmodel.eval().requires_grad_(False)
 
 prior_path = hf_hub_download(repo_id=model_repo, filename=prior_file)
-prior = PriorModel().to(device).half()
+prior = PriorModel().to(device)#.half()
 prior.load_state_dict(torch.load(prior_path, map_location=device))
 prior.eval().requires_grad_(False)
 
 model_path = hf_hub_download(repo_id=model_repo, filename=model_file)
 model = Paella(byt5_embd=2560)
 model.load_state_dict(torch.load(model_path, map_location=device))
-model.eval().requires_grad_().half()
+model.eval().requires_grad_()#.half()
 replace_attention_layers(model)
 model.to(device)
 
